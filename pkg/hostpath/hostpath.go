@@ -142,7 +142,7 @@ func (hp *hostPath) validateVolumeCapabilities(caps []*csi.VolumeCapability) err
 	}
 	for _, cap := range caps {
 		if err := hp.validateVolumeCapability(cap); err != nil {
-			return nil
+			return err
 		}
 	}
 	return nil
