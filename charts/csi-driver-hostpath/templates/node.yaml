@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "csi-driver-hostpath.fullname" . }}-node
+  labels:
+    {{- include "csi-driver-hostpath.labels" . | nindent 4 }}
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.node.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "csi-driver-hostpath.selectorLabels" . | nindent 6 }}
+      app: {{ include "csi-driver-hostpath.fullname" . }}-node
+  template:
+    metadata:
+      {{- with .Values.node.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "csi-driver-hostpath.selectorLabels" . | nindent 8 }}
+        app: {{ include "csi-driver-hostpath.fullname" . }}-node
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "csi-driver-hostpath.serviceAccountName" . }}-node
+      securityContext:
+        {{- toYaml .Values.node.podSecurityContext | nindent 8 }}
+      containers:
+        - name: node-driver-registrar
+          image: "{{ .Values.image.nodeDriverRegistrar.repository }}:{{ .Values.image.nodeDriverRegistrar.tag }}"
+          imagePullPolicy: {{ .Values.image.nodeDriverRegistrar.pullPolicy }}
+          args:
+            - --csi-address=$(ADDRESS)
+            - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
+            - -v={{ .Values.node.nodeDriverRegistrar.logLevel }}
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: DRIVER_REG_SOCK_PATH
+              value: {{ .Values.kubeletDir }}/plugins/{{ .Values.driver.name }}/csi.sock
+          livenessProbe:
+            exec:
+              command:
+                - /csi-node-driver-registrar
+                - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
+                - --mode=kubelet-registration-probe
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 2
+          resources:
+            {{- toYaml .Values.node.nodeDriverRegistrar.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: "{{ .Values.image.livenessProbe.repository }}:{{ .Values.image.livenessProbe.tag }}"
+          imagePullPolicy: {{ .Values.image.livenessProbe.pullPolicy }}
+          args:
+            - --csi-address=$(ADDRESS)
+            - --health-port={{ .Values.node.livenessProbe.healthPort }}
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          resources:
+            {{- toYaml .Values.node.livenessProbe.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: hostpath
+          image: "{{ .Values.image.hostpath.repository }}:{{ .Values.image.hostpath.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.hostpath.pullPolicy }}
+          args:
+            - --drivername={{ .Values.driver.name }}
+            - --endpoint=$(CSI_ENDPOINT)
+            - --nodeid=$(NODE_ID)
+            - --datadir={{ .Values.driver.dataDir }}
+            - -v={{ .Values.node.logLevel }}
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: healthz
+              containerPort: {{ .Values.node.livenessProbe.healthPort }}
+              protocol: TCP
+          securityContext:
+            privileged: true
+          livenessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 2
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: mountpoint-dir
+              mountPath: {{ .Values.kubeletDir }}/pods
+              mountPropagation: Bidirectional
+            - name: csi-data-dir
+              mountPath: {{ .Values.driver.dataDir }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins/{{ .Values.driver.name }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ .Values.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: mountpoint-dir
+          hostPath:
+            path: {{ .Values.kubeletDir }}/pods
+            type: Directory
+        - name: csi-data-dir
+          hostPath:
+            path: {{ .Values.driver.dataDir }}
+            type: DirectoryOrCreate
