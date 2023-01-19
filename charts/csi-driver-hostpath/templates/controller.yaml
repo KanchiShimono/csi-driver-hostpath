@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "csi-driver-hostpath.fullname" . }}-controller
+  labels:
+    {{- include "csi-driver-hostpath.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "csi-driver-hostpath.selectorLabels" . | nindent 6 }}
+      app: {{ include "csi-driver-hostpath.fullname" . }}-controller
+  template:
+    metadata:
+      {{- with .Values.controller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "csi-driver-hostpath.selectorLabels" . | nindent 8 }}
+        app: {{ include "csi-driver-hostpath.fullname" . }}-controller
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "csi-driver-hostpath.serviceAccountName" . }}-controller
+      securityContext:
+        {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
+      containers:
+        - name: csi-provisioner
+          image: "{{ .Values.image.csiProvisioner.repository }}:{{ .Values.image.csiProvisioner.tag }}"
+          imagePullPolicy: {{ .Values.image.csiProvisioner.pullPolicy }}
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election
+            - --leader-election-namespace=$(NAMESPACE)
+            - --extra-create-metadata
+            - --worker-threads=5
+            - -v={{ .Values.controller.csiProvisioner.logLevel }}
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.controller.csiProvisioner.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: liveness-probe
+          image: "{{ .Values.image.livenessProbe.repository }}:{{ .Values.image.livenessProbe.tag }}"
+          imagePullPolicy: {{ .Values.image.livenessProbe.pullPolicy }}
+          args:
+            - --csi-address=$(ADDRESS)
+            - --health-port={{ .Values.controller.livenessProbe.healthPort }}
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          resources:
+            {{- toYaml .Values.controller.livenessProbe.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: hostpath
+          image: "{{ .Values.image.hostpath.repository }}:{{ .Values.image.hostpath.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.hostpath.pullPolicy }}
+          args:
+            - --drivername={{ .Values.driver.name }}
+            - --endpoint=$(CSI_ENDPOINT)
+            - --nodeid=$(NODE_ID)
+            - --datadir={{ .Values.driver.dataDir }}
+            - -v={{ .Values.controller.logLevel }}
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: healthz
+              containerPort: {{ .Values.controller.livenessProbe.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 2
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: csi-data-dir
+              mountPath: {{ .Values.driver.dataDir }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: csi-data-dir
+          hostPath:
+            path: {{ .Values.driver.dataDir }}
+            type: DirectoryOrCreate
